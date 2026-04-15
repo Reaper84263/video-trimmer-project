@@ -482,12 +482,6 @@ function VideoTrimmerApp() {
     if (!video) return;
     const t = video.currentTime;
     setCurrentTime(t);
-
-    if (range[1] > 0 && t >= range[1]) {
-      video.pause();
-      video.currentTime = range[0];
-      setIsPlaying(false);
-    }
   };
 
   const togglePlay = async () => {
@@ -500,7 +494,7 @@ function VideoTrimmerApp() {
       return;
     }
 
-    if (video.currentTime < range[0] || video.currentTime >= range[1]) {
+    if (video.currentTime < range[0]) {
       video.currentTime = range[0];
     }
 
@@ -548,12 +542,14 @@ function VideoTrimmerApp() {
   };
 
   const copyCurrentTimeToStart = () => {
-    applyRange(currentTime, Math.max(currentTime + 0.1, range[1]), { seekTo: currentTime });
+    const nextTime = Math.floor(currentTime);
+    applyRange(nextTime, Math.max(nextTime + 0.1, range[1]), { seekTo: currentTime });
     setStatus("Trim start copied from player time.");
   };
 
   const copyCurrentTimeToEnd = () => {
-    applyRange(range[0], currentTime, { seekTo: currentTime });
+    const nextTime = Math.floor(currentTime);
+    applyRange(range[0], nextTime, { seekTo: currentTime });
     setStatus("Trim end copied from player time.");
   };
 
@@ -592,6 +588,8 @@ function VideoTrimmerApp() {
         "libx264",
         "-preset",
         "ultrafast",
+        "-tune",
+        "fastdecode",
         "-crf",
         "23",
         "-c:a",
