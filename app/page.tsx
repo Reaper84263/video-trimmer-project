@@ -106,6 +106,62 @@ function Progress({ value = 0, className = "" }: { value?: number; className?: s
   );
 }
 
+function PlayerTimeline({
+  value,
+  max,
+  onSeek,
+}: {
+  value: number;
+  max: number;
+  onSeek: (nextValue: number) => void;
+}) {
+  const trackRef = useRef<HTMLDivElement | null>(null);
+  const [hoverValue, setHoverValue] = useState<number | null>(null);
+
+  const safeMax = Math.max(max, 0.1);
+  const currentPercent = (clamp(value, 0, safeMax) / safeMax) * 100;
+  const hoverPercent = hoverValue === null ? 0 : (clamp(hoverValue, 0, safeMax) / safeMax) * 100;
+
+  const getValueFromClientX = (clientX: number) => {
+    const rect = trackRef.current?.getBoundingClientRect();
+    if (!rect) return 0;
+    const ratio = clamp((clientX - rect.left) / rect.width, 0, 1);
+    return ratio * safeMax;
+  };
+
+  return (
+    <div
+      ref={trackRef}
+      className="relative h-10 cursor-pointer"
+      onMouseMove={(e) => setHoverValue(getValueFromClientX(e.clientX))}
+      onMouseLeave={() => setHoverValue(null)}
+      onClick={(e) => onSeek(getValueFromClientX(e.clientX))}
+    >
+      {hoverValue !== null && (
+        <div
+          className="pointer-events-none absolute bottom-full mb-2 -translate-x-1/2 rounded-md bg-[#313844] px-2 py-1 font-mono text-xs font-semibold text-white shadow-lg"
+          style={{ left: `${hoverPercent}%` }}
+        >
+          {formatTimestamp(hoverValue)}
+        </div>
+      )}
+
+      <div className="absolute left-0 top-1/2 h-[6px] w-full -translate-y-1/2 rounded-full bg-[#b7bcc5]" />
+      <div
+        className="absolute left-0 top-1/2 h-[6px] -translate-y-1/2 rounded-full bg-[#595f6b]"
+        style={{ width: `${currentPercent}%` }}
+      />
+
+      {hoverValue !== null && (
+        <div
+          className="pointer-events-none absolute top-1/2 h-4 w-[2px] -translate-y-1/2 bg-white/85"
+          style={{ left: `${hoverPercent}%` }}
+        />
+      )}
+    </div>
+  );
+}
+
 function Slider({
   value,
   min,
@@ -242,6 +298,14 @@ const formatTimestamp = (seconds: number) => {
   return [hrs, mins, secs].map((v) => String(v).padStart(2, "0")).join(":") + `.${String(hundredths).padStart(2, "0")}`;
 };
 
+const parseTimestamp = (value: string) => {
+  const match = value.trim().match(/^(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,2}))?$/);
+  if (!match) return null;
+
+  const [, hours, minutes, seconds, hundredths = "0"] = match;
+  return Number(hours) * 3600 + Number(minutes) * 60 + Number(seconds) + Number(hundredths.padEnd(2, "0")) / 100;
+};
+
 const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
 
 const PRESETS = [
@@ -287,6 +351,8 @@ function VideoTrimmerApp() {
   const [error, setError] = useState("");
   const [status, setStatus] = useState("Upload a video to get started.");
   const [progress, setProgress] = useState(0);
+  const [startInput, setStartInput] = useState(formatTimestamp(0));
+  const [endInput, setEndInput] = useState(formatTimestamp(0));
 
   useEffect(() => {
     return () => {
@@ -297,6 +363,11 @@ function VideoTrimmerApp() {
 
   const selectionLength = useMemo(() => Math.max(0, range[1] - range[0]), [range]);
   const previewUrl = trimmedUrl || videoUrl;
+
+  useEffect(() => {
+    setStartInput(formatTimestamp(range[0]));
+    setEndInput(formatTimestamp(range[1]));
+  }, [range]);
 
   const clearOutput = () => {
     if (trimmedUrlRef.current) {
@@ -618,20 +689,18 @@ function VideoTrimmerApp() {
                         >
                           {isPlaying ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4 fill-current" />}
                         </button>
-                        <div className="min-w-[48px] rounded-md bg-[#313844] px-3 py-2 text-center font-semibold text-white">
-                          {formatTime(currentTime)}
+                        <div className="min-w-[118px] rounded-md bg-[#313844] px-3 py-2 text-center font-mono font-semibold text-white">
+                          {formatTimestamp(currentTime)}
                         </div>
                         <div className="flex-1">
-                          <Slider
-                            value={[clamp(currentTime, 0, Math.max(duration, 0.1))]}
-                            min={0}
+                          <PlayerTimeline
+                            value={currentTime}
                             max={Math.max(duration, 0.1)}
-                            step={0.05}
-                            onValueChange={(value) => {
+                            onSeek={(nextValue) => {
                               const video = videoRef.current;
                               if (!video) return;
-                              video.currentTime = value[0];
-                              setCurrentTime(value[0]);
+                              video.currentTime = nextValue;
+                              setCurrentTime(nextValue);
                             }}
                           />
                         </div>
@@ -664,7 +733,7 @@ function VideoTrimmerApp() {
                         </p>
                       </div>
                       <Badge className="rounded-full bg-[#eef0ff] text-[#545add]">
-                        {formatTime(selectionLength)} selected
+                        {formatTimestamp(selectionLength)} selected
                       </Badge>
                     </div>
 
@@ -713,12 +782,18 @@ function VideoTrimmerApp() {
                     </div>
                     <div className="relative">
                       <Input
-                        type="number"
-                        min={0}
-                        max={Math.max(0, duration - 0.1)}
-                        step={0.1}
-                        value={Number(range[0].toFixed(1))}
-                        onChange={(e) => applyRange(Number(e.target.value || 0), range[1])}
+                        type="text"
+                        inputMode="numeric"
+                        value={startInput}
+                        onChange={(e) => setStartInput(e.target.value)}
+                        onBlur={() => {
+                          const parsed = parseTimestamp(startInput);
+                          if (parsed === null) {
+                            setStartInput(formatTimestamp(range[0]));
+                            return;
+                          }
+                          applyRange(parsed, range[1]);
+                        }}
                         className="pr-12 font-mono text-base"
                       />
                       <span className="pointer-events-none absolute inset-y-0 right-4 flex items-center text-slate-500">
@@ -742,12 +817,18 @@ function VideoTrimmerApp() {
                     </div>
                     <div className="relative">
                       <Input
-                        type="number"
-                        min={0.1}
-                        max={Math.max(duration, 0.1)}
-                        step={0.1}
-                        value={Number(range[1].toFixed(1))}
-                        onChange={(e) => applyRange(range[0], Number(e.target.value || range[0] + 0.1))}
+                        type="text"
+                        inputMode="numeric"
+                        value={endInput}
+                        onChange={(e) => setEndInput(e.target.value)}
+                        onBlur={() => {
+                          const parsed = parseTimestamp(endInput);
+                          if (parsed === null) {
+                            setEndInput(formatTimestamp(range[1]));
+                            return;
+                          }
+                          applyRange(range[0], parsed);
+                        }}
                         className="pr-12 font-mono text-base"
                       />
                       <span className="pointer-events-none absolute inset-y-0 right-4 flex items-center text-slate-500">
