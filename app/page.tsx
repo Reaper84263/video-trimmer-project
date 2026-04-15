@@ -250,7 +250,8 @@ const PRESETS = [
   { label: "60 sec", value: 60 },
 ];
 
-const FFMPEG_BASE_URL = "https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/esm";
+const FFMPEG_CORE_VERSION = "0.12.10";
+const FFMPEG_BASE_URL = `https://cdn.jsdelivr.net/npm/@ffmpeg/core@${FFMPEG_CORE_VERSION}/dist/esm`;
 
 function getFileExtension(name: string) {
   const ext = name.split(".").pop()?.toLowerCase();
@@ -263,13 +264,15 @@ function buildOutputName(name: string) {
 }
 
 function VideoTrimmerApp() {
-  const MAX_FILE_SIZE_MB = 500;
+  const MAX_FILE_SIZE_GB = 20;
+  const MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_GB * 1024 * 1024 * 1024;
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const sourceUrlRef = useRef<string>("");
   const trimmedUrlRef = useRef<string>("");
   const ffmpegRef = useRef<FFmpeg | null>(null);
   const ffmpegLoadedRef = useRef(false);
+  const ffmpegLogsRef = useRef<string[]>([]);
 
   const [file, setFile] = useState<File | null>(null);
   const [videoUrl, setVideoUrl] = useState("");
@@ -322,6 +325,11 @@ function VideoTrimmerApp() {
 
     try {
       const ffmpeg = ffmpegRef.current ?? new FFmpeg();
+      ffmpegLogsRef.current = [];
+
+      ffmpeg.on("log", ({ message }) => {
+        ffmpegLogsRef.current = [...ffmpegLogsRef.current.slice(-39), message];
+      });
 
       ffmpeg.on("progress", ({ progress: value }) => {
         const adjusted = Math.max(10, Math.min(99, Math.round(value * 100)));
@@ -331,6 +339,7 @@ function VideoTrimmerApp() {
       await ffmpeg.load({
         coreURL: await toBlobURL(`${FFMPEG_BASE_URL}/ffmpeg-core.js`, "text/javascript"),
         wasmURL: await toBlobURL(`${FFMPEG_BASE_URL}/ffmpeg-core.wasm`, "application/wasm"),
+        workerURL: await toBlobURL(`${FFMPEG_BASE_URL}/ffmpeg-core.worker.js`, "text/javascript"),
       });
 
       ffmpegRef.current = ffmpeg;
@@ -338,8 +347,9 @@ function VideoTrimmerApp() {
       setStatus("Trim engine ready.");
       setProgress(0);
       return ffmpeg;
-    } catch {
-      setError("Could not load FFmpeg. This app works in a normal deployed Next.js environment, but some preview sandboxes block the FFmpeg asset downloads.");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown FFmpeg load error.";
+      setError(`Could not load FFmpeg: ${message}`);
       setStatus("Failed to load trimming engine.");
       throw new Error("ffmpeg-load-failed");
     } finally {
@@ -355,9 +365,9 @@ function VideoTrimmerApp() {
       return;
     }
 
-    const fileSizeMb = selectedFile.size / (1024 * 1024);
-    if (fileSizeMb > MAX_FILE_SIZE_MB) {
-      setError(`This file is ${fileSizeMb.toFixed(1)} MB. For best results, use files under ${MAX_FILE_SIZE_MB} MB in the browser version.`);
+    const fileSizeGb = selectedFile.size / (1024 * 1024 * 1024);
+    if (selectedFile.size > MAX_FILE_SIZE_BYTES) {
+      setError(`This file is ${fileSizeGb.toFixed(2)} GB. The upload limit is ${MAX_FILE_SIZE_GB} GB.`);
       return;
     }
 
@@ -478,7 +488,7 @@ function VideoTrimmerApp() {
       await ffmpeg.writeFile(inputName, await fetchFile(file));
 
       setStatus("Trimming and encoding MP4...");
-      await ffmpeg.exec([
+      const exitCode = await ffmpeg.exec([
         "-ss",
         `${range[0]}`,
         "-i",
@@ -501,6 +511,11 @@ function VideoTrimmerApp() {
         "+faststart",
         outputName,
       ]);
+
+      if (exitCode !== 0) {
+        const recentLog = ffmpegLogsRef.current.slice(-6).join(" ").trim();
+        throw new Error(recentLog || `FFmpeg exited with code ${exitCode}.`);
+      }
 
       setStatus("Building download file...");
       setProgress(99);
@@ -528,8 +543,9 @@ function VideoTrimmerApp() {
 
       setStatus("Trim complete. Your MP4 is ready to download.");
       setProgress(100);
-    } catch {
-      setError("Trimming failed. If you are testing inside a restricted preview, deploy the app to Next.js or Vercel and it should work normally there.");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown trimming error.";
+      setError(`Trimming failed: ${message}`);
       setStatus("Trimming failed.");
       setProgress(0);
     } finally {
