@@ -16,7 +16,7 @@ import {
   ChevronDown,
 } from "lucide-react";
 import { FFmpeg } from "@ffmpeg/ffmpeg";
-import { fetchFile, toBlobURL } from "@ffmpeg/util";
+import { toBlobURL } from "@ffmpeg/util";
 
 type ButtonProps = React.ButtonHTMLAttributes<HTMLButtonElement> & {
   variant?: "default" | "secondary" | "outline";
@@ -336,9 +336,19 @@ function buildOutputName(name: string) {
   return `${base}-trimmed.mp4`;
 }
 
+async function readFileForFFmpeg(file: File) {
+  try {
+    const buffer = await file.arrayBuffer();
+    return new Uint8Array(buffer);
+  } catch {
+    throw new Error("Could not read the selected file. Please reselect it and try again.");
+  }
+}
+
 function VideoTrimmerApp() {
   const MAX_FILE_SIZE_GB = 20;
   const MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_GB * 1024 * 1024 * 1024;
+  const CLIENT_FALLBACK_LIMIT_BYTES = 750 * 1024 * 1024;
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const sourceUrlRef = useRef<string>("");
@@ -555,14 +565,111 @@ function VideoTrimmerApp() {
     setStatus("Trim end copied from player time.");
   };
 
+  const trimInBrowser = async (activeFile: File) => {
+    const ffmpeg = await loadFFmpeg();
+    const inputExt = getFileExtension(activeFile.name);
+    const inputName = `input.${inputExt}`;
+    const outputName = "output.mp4";
+
+    setStatus("Uploading video into FFmpeg memory...");
+    await ffmpeg.writeFile(inputName, await readFileForFFmpeg(activeFile));
+
+    setStatus("Trimming video...");
+    let exitCode = await ffmpeg.exec([
+      "-ss",
+      `${range[0]}`,
+      "-i",
+      inputName,
+      "-t",
+      `${selectionLength}`,
+      "-c",
+      "copy",
+      "-movflags",
+      "+faststart",
+      outputName,
+    ]);
+
+    if (exitCode !== 0) {
+      setStatus("Fast trim fallback: building a compatible MP4...");
+      exitCode = await ffmpeg.exec([
+      "-ss",
+      `${range[0]}`,
+      "-i",
+      inputName,
+      "-t",
+      `${selectionLength}`,
+      "-c:v",
+      "libx264",
+      "-preset",
+      "ultrafast",
+      "-tune",
+      "fastdecode",
+      "-crf",
+      "23",
+      "-c:a",
+      "aac",
+      "-b:a",
+      "128k",
+      "-pix_fmt",
+      "yuv420p",
+      "-movflags",
+      "+faststart",
+      outputName,
+      ]);
+    }
+
+    if (exitCode !== 0) {
+      const recentLog = ffmpegLogsRef.current.slice(-6).join(" ").trim();
+      throw new Error(recentLog || `FFmpeg exited with code ${exitCode}.`);
+    }
+
+    const data = await ffmpeg.readFile(outputName);
+    if (typeof data === "string") {
+      throw new Error("Expected ffmpeg output file to be binary data.");
+    }
+
+    const bytes = data;
+    const arrayBuffer = bytes.buffer.slice(
+      bytes.byteOffset,
+      bytes.byteOffset + bytes.byteLength
+    ) as ArrayBuffer;
+    const blob = new Blob([arrayBuffer], { type: "video/mp4" });
+
+    try {
+      await ffmpeg.deleteFile(inputName);
+      await ffmpeg.deleteFile(outputName);
+    } catch {
+      // no-op
+    }
+
+    return blob;
+  };
+
+  const trimOnServer = async (activeFile: File) => {
+    const payload = new FormData();
+    payload.append("file", activeFile);
+    payload.append("start", `${range[0]}`);
+    payload.append("duration", `${selectionLength}`);
+
+    const response = await fetch("/api/trim", {
+      method: "POST",
+      body: payload,
+    });
+
+    if (!response.ok) {
+      const message = await response.text();
+      throw new Error(message || `Server trim failed with status ${response.status}.`);
+    }
+
+    return response.blob();
+  };
+
   const handleTrim = async () => {
     if (!file) return;
-
     if (selectionLength <= 0.1) {
       setError("Please choose an end time that is after the start time.");
       return;
     }
-
     try {
       setIsTrimming(true);
       setError("");
@@ -570,87 +677,24 @@ function VideoTrimmerApp() {
       setStatus("Preparing video for trimming...");
       clearOutput();
 
-      const ffmpeg = await loadFFmpeg();
-      const inputExt = getFileExtension(file.name);
-      const inputName = `input.${inputExt}`;
-      const outputName = "output.mp4";
-
-      setStatus("Uploading video into FFmpeg memory...");
-      await ffmpeg.writeFile(inputName, await fetchFile(file));
-
-      setStatus("Trimming video...");
-      let exitCode = await ffmpeg.exec([
-        "-ss",
-        `${range[0]}`,
-        "-i",
-        inputName,
-        "-t",
-        `${selectionLength}`,
-        "-c",
-        "copy",
-        "-movflags",
-        "+faststart",
-        outputName,
-      ]);
-
-      if (exitCode !== 0) {
-        setStatus("Fast trim fallback: building a compatible MP4...");
-        exitCode = await ffmpeg.exec([
-        "-ss",
-        `${range[0]}`,
-        "-i",
-        inputName,
-        "-t",
-        `${selectionLength}`,
-        "-c:v",
-        "libx264",
-        "-preset",
-        "ultrafast",
-        "-tune",
-        "fastdecode",
-        "-crf",
-        "23",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "128k",
-        "-pix_fmt",
-        "yuv420p",
-        "-movflags",
-        "+faststart",
-        outputName,
-        ]);
-      }
-
-      if (exitCode !== 0) {
-        const recentLog = ffmpegLogsRef.current.slice(-6).join(" ").trim();
-        throw new Error(recentLog || `FFmpeg exited with code ${exitCode}.`);
+      let outputBlob: Blob;
+      setStatus("Uploading video to server for trimming...");
+      try {
+        outputBlob = await trimOnServer(file);
+      } catch (serverError) {
+        if (file.size > CLIENT_FALLBACK_LIMIT_BYTES) {
+          throw serverError;
+        }
+        setStatus("Server trim unavailable. Falling back to in-browser trimming...");
+        outputBlob = await trimInBrowser(file);
       }
 
       setStatus("Building download file...");
       setProgress(99);
-      const data = await ffmpeg.readFile(outputName);
-      if (typeof data === "string") {
-        throw new Error("Expected ffmpeg output file to be binary data.");
-      }
-
-      const bytes = data;
-      const arrayBuffer = bytes.buffer.slice(
-        bytes.byteOffset,
-        bytes.byteOffset + bytes.byteLength
-      ) as ArrayBuffer;
-      const blob = new Blob([arrayBuffer], { type: "video/mp4" });
-      const nextUrl = URL.createObjectURL(blob);
+      const nextUrl = URL.createObjectURL(outputBlob);
       trimmedUrlRef.current = nextUrl;
       setTrimmedUrl(nextUrl);
       setScreen("results");
-
-      try {
-        await ffmpeg.deleteFile(inputName);
-        await ffmpeg.deleteFile(outputName);
-      } catch {
-        // no-op
-      }
 
       setStatus("Trim complete. Your MP4 is ready to download.");
       setProgress(100);
