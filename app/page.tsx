@@ -336,6 +336,10 @@ function buildOutputName(name: string) {
   return `${base}-trimmed.mp4`;
 }
 
+function isPayloadTooLargeError(message: string) {
+  return /payload[_\s-]?too[_\s-]?large|request entity too large/i.test(message);
+}
+
 async function readFileForFFmpeg(file: File) {
   try {
     const buffer = await file.arrayBuffer();
@@ -348,6 +352,8 @@ async function readFileForFFmpeg(file: File) {
 function VideoTrimmerApp() {
   const MAX_FILE_SIZE_GB = 20;
   const MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_GB * 1024 * 1024 * 1024;
+  const SERVER_UPLOAD_LIMIT_MB = 100;
+  const SERVER_UPLOAD_LIMIT_BYTES = SERVER_UPLOAD_LIMIT_MB * 1024 * 1024;
   const CLIENT_FALLBACK_LIMIT_BYTES = 750 * 1024 * 1024;
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -678,15 +684,21 @@ function VideoTrimmerApp() {
       clearOutput();
 
       let outputBlob: Blob;
-      setStatus("Uploading video to server for trimming...");
-      try {
-        outputBlob = await trimOnServer(file);
-      } catch (serverError) {
-        if (file.size > CLIENT_FALLBACK_LIMIT_BYTES) {
-          throw serverError;
-        }
-        setStatus("Server trim unavailable. Falling back to in-browser trimming...");
+      if (file.size > SERVER_UPLOAD_LIMIT_BYTES) {
+        setStatus(`Large file detected. Trimming in your browser to avoid upload limits above ${SERVER_UPLOAD_LIMIT_MB} MB...`);
         outputBlob = await trimInBrowser(file);
+      } else {
+        setStatus("Uploading video to server for trimming...");
+        try {
+          outputBlob = await trimOnServer(file);
+        } catch (serverError) {
+          const serverMessage = serverError instanceof Error ? serverError.message : "Unknown server trim error.";
+          if (file.size > CLIENT_FALLBACK_LIMIT_BYTES && !isPayloadTooLargeError(serverMessage)) {
+            throw serverError;
+          }
+          setStatus("Server trim unavailable. Falling back to in-browser trimming...");
+          outputBlob = await trimInBrowser(file);
+        }
       }
 
       setStatus("Building download file...");
